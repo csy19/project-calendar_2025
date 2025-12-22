@@ -244,11 +244,11 @@ const getRandomLegImage = () => {
   for (const file of pattern.files) {
     random -= file.weight;
     if (random <= 0) {
-      return `/images/ashi/ashi${file.name}.png`;
+      return `images/ashi/ashi${file.name}.png`;
     }
   }
 
-  return `/images/ashi/ashi${pattern.files[0].name}.png`;
+  return `images/ashi/ashi${pattern.files[0].name}.png`;
 };
 
 const addLegs = async () => {
@@ -419,7 +419,7 @@ const downloadImage = () => {
               >
                 <img
                   v-if="pattern.files.length === 1"
-                  :src="`/images/ashi/ashi${pattern.files[0].name}.png`"
+                  :src="`images/ashi/ashi${pattern.files[0].name}.png`"
                   :alt="pattern.label"
                 />
                 <span v-else>{{ pattern.label }}</span>
