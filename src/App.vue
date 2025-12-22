@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { ObjectDetector, FilesetResolver } from '@mediapipe/tasks-vision';
 
 const imageFile = ref(null);
@@ -8,10 +8,16 @@ const predictions = ref([]);
 const detector = ref(null);
 const isLoading = ref(false);
 const isDetecting = ref(false);
+const isAddingLegs = ref(false); // 足を生やす処理中
 const canvasRef = ref(null);
 const numLegs = ref(10);
 const excludedIndices = ref(new Set());
 const selectedLegPattern = ref('01');
+const errorMessage = ref(''); // エラーメッセージ
+
+// 画像サイズ制限（10MB）
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 4096;
 
 // 足パターンの定義（重み付き）
 const legPatterns = [
@@ -26,7 +32,7 @@ const legPatterns = [
     files: [
       { name: '06', weight: 1 },
       { name: '07', weight: 1 },
-      { name: '08', weight: 0.2 }, // レア
+      { name: '08', weight: 0.2 },
     ],
   },
   {
@@ -34,7 +40,7 @@ const legPatterns = [
     label: '🎲 9-10',
     files: [
       { name: '09', weight: 1 },
-      { name: '10', weight: 0.2 }, // レア
+      { name: '10', weight: 0.2 },
     ],
   },
   {
@@ -57,6 +63,7 @@ const legPatterns = [
 
 onMounted(async () => {
   isLoading.value = true;
+  errorMessage.value = '';
 
   try {
     const vision = await FilesetResolver.forVisionTasks(
@@ -71,47 +78,90 @@ onMounted(async () => {
       scoreThreshold: 0.5,
       runningMode: 'IMAGE',
     });
-
-    console.log('MediaPipe ObjectDetector loaded!');
   } catch (error) {
     console.error('Error loading MediaPipe:', error);
+    errorMessage.value =
+      '物体検出モデルの読み込みに失敗しました。ページを再読み込みしてください。';
+  } finally {
+    isLoading.value = false;
   }
-
-  isLoading.value = false;
 });
 
-const handleImageUpload = (event) => {
+// クリーンアップ
+onUnmounted(() => {
+  if (imageUrl.value) {
+    URL.revokeObjectURL(imageUrl.value);
+  }
+});
+
+const handleImageUpload = async (event) => {
   const file = event.target.files[0];
-  if (file) {
+  if (!file) return;
+
+  errorMessage.value = '';
+
+  // ファイルサイズチェック
+  if (file.size > MAX_FILE_SIZE) {
+    errorMessage.value = '画像サイズが大きすぎます（最大10MB）';
+    return;
+  }
+
+  // 画像の解像度チェック
+  const img = new Image();
+  const objectUrl = URL.createObjectURL(file);
+
+  img.onload = () => {
+    if (img.width > MAX_IMAGE_DIMENSION || img.height > MAX_IMAGE_DIMENSION) {
+      errorMessage.value = `画像サイズが大きすぎます（最大${MAX_IMAGE_DIMENSION}×${MAX_IMAGE_DIMENSION}px）`;
+      URL.revokeObjectURL(objectUrl);
+      return;
+    }
+
+    // 古いURLをクリーンアップ
+    if (imageUrl.value) {
+      URL.revokeObjectURL(imageUrl.value);
+    }
+
     imageFile.value = file;
-    imageUrl.value = URL.createObjectURL(file);
+    imageUrl.value = objectUrl;
     predictions.value = [];
     excludedIndices.value.clear();
-  }
+  };
+
+  img.onerror = () => {
+    errorMessage.value = '画像の読み込みに失敗しました';
+    URL.revokeObjectURL(objectUrl);
+  };
+
+  img.src = objectUrl;
 };
 
 const detectObjects = async () => {
   if (!imageUrl.value || !detector.value || isDetecting.value) return;
 
   isDetecting.value = true;
+  errorMessage.value = '';
 
   try {
     const img = document.getElementById('uploaded-image');
 
     if (!img.complete || img.naturalWidth === 0) {
-      console.log('Image not fully loaded yet');
       isDetecting.value = false;
       return;
     }
 
-    console.log('Detecting objects...');
     const result = detector.value.detect(img);
     predictions.value = result.detections;
-    console.log('Detections:', predictions.value);
+
+    if (predictions.value.length === 0) {
+      errorMessage.value =
+        '物体が検出されませんでした。別の画像を試してみてください。';
+    }
 
     drawImageWithButtons();
   } catch (error) {
     console.error('Error in detectObjects:', error);
+    errorMessage.value = '物体検出に失敗しました';
   } finally {
     isDetecting.value = false;
   }
@@ -141,7 +191,6 @@ const drawImageWithButtons = () => {
 
     ctx.strokeRect(box.originX, box.originY, box.width, box.height);
 
-    // ×ボタンのサイズを固定（最小40px）
     const btnSize = 40;
     const btnX = box.originX + box.width - btnSize - 5;
     const btnY = box.originY + 5;
@@ -172,7 +221,7 @@ const handleCanvasClick = (event) => {
 
   predictions.value.forEach((detection, index) => {
     const box = detection.boundingBox;
-    const btnSize = 40; // 同じサイズに
+    const btnSize = 40;
     const btnX = box.originX + box.width - btnSize - 5;
     const btnY = box.originY + 5;
 
@@ -187,17 +236,11 @@ const handleCanvasClick = (event) => {
   });
 };
 
-// 重み付きランダム選択
 const getRandomLegImage = () => {
   const pattern = legPatterns.find((p) => p.id === selectedLegPattern.value);
-
-  // 重みの合計を計算
   const totalWeight = pattern.files.reduce((sum, file) => sum + file.weight, 0);
-
-  // ランダム値を生成
   let random = Math.random() * totalWeight;
 
-  // 重みに基づいて選択
   for (const file of pattern.files) {
     random -= file.weight;
     if (random <= 0) {
@@ -205,64 +248,91 @@ const getRandomLegImage = () => {
     }
   }
 
-  // フォールバック
   return `/images/ashi/ashi${pattern.files[0].name}.png`;
 };
 
 const addLegs = async () => {
-  const canvas = canvasRef.value;
-  const img = document.getElementById('uploaded-image');
-  const ctx = canvas.getContext('2d');
+  if (isAddingLegs.value) return;
 
-  ctx.drawImage(img, 0, 0);
+  isAddingLegs.value = true;
+  errorMessage.value = '';
 
-  for (const [index, detection] of predictions.value.entries()) {
-    if (excludedIndices.value.has(index)) continue;
+  try {
+    const canvas = canvasRef.value;
+    const img = document.getElementById('uploaded-image');
+    const ctx = canvas.getContext('2d');
 
-    const box = detection.boundingBox;
-    const bottomY = box.originY + box.height - 10;
+    ctx.drawImage(img, 0, 0);
 
-    const legWidth = box.width / numLegs.value;
+    // 並列で足画像を読み込み
+    const legImagePromises = [];
+    const legData = [];
 
-    for (let i = 0; i < numLegs.value; i++) {
-      const x = box.originX + i * legWidth;
+    for (const [index, detection] of predictions.value.entries()) {
+      if (excludedIndices.value.has(index)) continue;
 
-      const legImgSrc = getRandomLegImage();
-      const legImg = new Image();
+      const box = detection.boundingBox;
+      const bottomY = box.originY + box.height - 10;
+      const legWidth = box.width / numLegs.value;
 
-      await new Promise((resolve) => {
-        legImg.onload = () => {
-          // アスペクト比を保って描画
-          const aspectRatio = legImg.height / legImg.width;
-          const legHeight = legWidth * aspectRatio;
+      for (let i = 0; i < numLegs.value; i++) {
+        const x = box.originX + i * legWidth;
+        const legImgSrc = getRandomLegImage();
 
-          // ランダムで左右反転（50%の確率）
-          const shouldFlip = Math.random() > 0.5;
+        const promise = new Promise((resolve, reject) => {
+          const legImg = new Image();
+          legImg.onload = () => {
+            const aspectRatio = legImg.height / legImg.width;
+            const legHeight = legWidth * aspectRatio;
+            const shouldFlip = Math.random() > 0.5;
 
-          if (shouldFlip) {
-            ctx.save();
-            ctx.translate(x + legWidth, bottomY);
-            ctx.scale(-1, 1);
-            ctx.drawImage(legImg, 0, 0, legWidth, legHeight);
-            ctx.restore();
-          } else {
-            ctx.drawImage(legImg, x, bottomY, legWidth, legHeight);
-          }
+            resolve({ legImg, x, bottomY, legWidth, legHeight, shouldFlip });
+          };
+          legImg.onerror = () =>
+            reject(new Error('足画像の読み込みに失敗しました'));
+          legImg.src = legImgSrc;
+        });
 
-          resolve();
-        };
-        legImg.src = legImgSrc;
-      });
+        legImagePromises.push(promise);
+      }
     }
+
+    // 全ての画像を並列で読み込み
+    const allLegs = await Promise.all(legImagePromises);
+
+    // 描画
+    allLegs.forEach(
+      ({ legImg, x, bottomY, legWidth, legHeight, shouldFlip }) => {
+        if (shouldFlip) {
+          ctx.save();
+          ctx.translate(x + legWidth, bottomY);
+          ctx.scale(-1, 1);
+          ctx.drawImage(legImg, 0, 0, legWidth, legHeight);
+          ctx.restore();
+        } else {
+          ctx.drawImage(legImg, x, bottomY, legWidth, legHeight);
+        }
+      }
+    );
+  } catch (error) {
+    console.error('Error adding legs:', error);
+    errorMessage.value = '足を生やす処理に失敗しました';
+  } finally {
+    isAddingLegs.value = false;
   }
 };
 
 const downloadImage = () => {
-  const canvas = canvasRef.value;
-  const link = document.createElement('a');
-  link.download = 'legs-image.png';
-  link.href = canvas.toDataURL();
-  link.click();
+  try {
+    const canvas = canvasRef.value;
+    const link = document.createElement('a');
+    link.download = 'legs-image.png';
+    link.href = canvas.toDataURL();
+    link.click();
+  } catch (error) {
+    console.error('Error downloading image:', error);
+    errorMessage.value = '画像のダウンロードに失敗しました';
+  }
 };
 </script>
 
@@ -275,7 +345,12 @@ const downloadImage = () => {
       </div>
     </div>
 
-    <section class="pick-image" v-if="!imageUrl">
+    <!-- エラーメッセージ -->
+    <div v-if="errorMessage" class="error-message">
+      {{ errorMessage }}
+    </div>
+
+    <section class="pick-image" v-if="!imageUrl && !isLoading">
       <h1 class="top-image">
         <img src="/images/top.png" alt="あなたの画像に足を生やす あしはや" />
       </h1>
@@ -298,17 +373,21 @@ const downloadImage = () => {
               style="display: none"
             />
 
+            <!-- 検出中ローディング -->
+            <div v-if="isDetecting" class="detecting-overlay">
+              <div class="loading-text">物体を検出中...</div>
+              <div class="loading-image">
+                <img src="/images/loading.png" alt="loading" />
+              </div>
+            </div>
+
             <canvas
               ref="canvasRef"
               @click="handleCanvasClick"
-              style="
-                max-width: 100%;
-
-                cursor: pointer;
-              "
+              style="max-width: 100%; cursor: pointer"
             />
           </div>
-          <div class="sampling-items">
+          <div class="sampling-items" v-if="predictions.length > 0">
             <p>検出された物体:</p>
             <ul>
               <li v-for="(pred, index) in predictions" :key="index">
@@ -360,8 +439,13 @@ const downloadImage = () => {
           </div>
 
           <div class="add-legs-button">
-            <button @click="addLegs">
-              <img src="/images/button_01.svg" alt="あしを生やすボタン" />
+            <button @click="addLegs" :disabled="isAddingLegs">
+              <img
+                v-if="!isAddingLegs"
+                src="/images/button_01.svg"
+                alt="あしを生やすボタン"
+              />
+              <div v-else class="loading-text">あしを生やしています...</div>
             </button>
           </div>
           <div class="dl-button">
@@ -385,6 +469,36 @@ h3,
 h4 {
   font-family: 'Yusei Magic', sans-serif;
 }
+
+.error-message {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #ff6b6b;
+  color: white;
+  padding: 1rem 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+  max-width: 90%;
+  text-align: center;
+}
+
+.detecting-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
 .upload-section {
   margin: 2rem 0;
 }
@@ -430,12 +544,15 @@ h4 {
   border: 2px solid #3c3c3c;
   border-radius: 40px;
 }
+
 .image-section {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0 60px;
 }
+
 .upload-image {
+  position: relative;
   grid-area: 0 / 1;
   overflow: hidden;
   border-radius: 20px;
@@ -481,9 +598,6 @@ h4 {
 
 .pattern-btn.active {
   border-color: red;
-}
-
-.pattern-btn:hover {
 }
 
 .leg-control {
@@ -568,6 +682,36 @@ input[type='range'] {
   }
   to {
     rotate: -360deg;
+  }
+}
+
+/* モバイル対応 */
+@media (max-width: 768px) {
+  .settings {
+    width: 95%;
+    padding: 20px;
+  }
+
+  .image-section {
+    grid-template-columns: 1fr;
+  }
+
+  .top-image {
+    min-width: 300px;
+  }
+
+  .file-upload {
+    width: 300px;
+    height: 70px;
+  }
+
+  .pattern-params {
+    grid-template-columns: repeat(3, auto);
+    padding: 15px;
+  }
+
+  .leg-control {
+    grid-area: auto;
   }
 }
 </style>
