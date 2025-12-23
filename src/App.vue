@@ -362,6 +362,9 @@ const downloadImage = () => {
       </div>
     </section>
 
+    <div class="setting-title" v-if="imageUrl">
+      <img src="/images/title.png" alt="あしはやのタイトル" />
+    </div>
     <section v-if="imageUrl" class="settings">
       <div class="image-section">
         <div class="upload-image-wrap">
@@ -533,6 +536,14 @@ h4 {
   }
   input {
     display: none;
+  }
+}
+
+.setting-title {
+  width: 276px;
+  margin: 50px auto 0;
+  img {
+    width: 100%;
   }
 }
 
